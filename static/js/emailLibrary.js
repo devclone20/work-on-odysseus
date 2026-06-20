@@ -1715,6 +1715,12 @@ async function _loadFolders({ resetMissing = false } = {}) {
     schedOpt.textContent = 'Scheduled';
     if (state._libFolder === '__scheduled__') schedOpt.selected = true;
     sel.appendChild(schedOpt);
+    // Email Approval (special virtual folder) — agent-staged emails awaiting send
+    const apprOpt = document.createElement('option');
+    apprOpt.value = '__approval__';
+    apprOpt.textContent = 'Email Approval';
+    if (state._libFolder === '__approval__') apprOpt.selected = true;
+    sel.appendChild(apprOpt);
     sel.value = state._libFolder;
   } catch (e) {}
 }
@@ -2630,7 +2636,9 @@ async function _loadEmails({ force = false, useCache = true } = {}) {
 
   try {
     _syncUnreadWindowGlow();
-    if (folderAtStart === '__scheduled__') {
+    if (folderAtStart === '__approval__') {
+      await _loadPendingApprovals(grid, sp);
+    } else if (folderAtStart === '__scheduled__') {
       await _loadScheduled(grid, sp);
     } else {
       const accountQS = accountAtStart ? `&account_id=${encodeURIComponent(accountAtStart)}` : '';
@@ -2737,6 +2745,93 @@ async function _loadScheduled(grid, sp) {
     actionsWrap.className = 'memory-item-actions';
     actionsWrap.appendChild(cancelBtn);
     card.appendChild(actionsWrap);
+
+    grid.appendChild(card);
+  }
+}
+
+// Agent send-confirm: emails the agent staged for approval (status='agent_draft'
+// in scheduled_emails) when the Email Safety gate is on. Lists them with
+// Approve & send / Reject wired to the existing pending endpoints.
+async function _loadPendingApprovals(grid, sp) {
+  let items = [];
+  try {
+    const res = await fetch(`${API_BASE}/api/email/pending`, { credentials: 'same-origin' });
+    const data = await res.json();
+    items = data.pending || [];
+  } catch (e) {
+    if (sp) sp.destroy();
+    grid.innerHTML = `<div class="email-loading">${_esc(e && e.message ? e.message : 'Failed to load')}</div>`;
+    return;
+  }
+  if (sp) sp.destroy();
+  grid.innerHTML = '';
+  const stats = document.getElementById('email-lib-stats');
+  if (stats) stats.textContent = `${items.length} awaiting approval`;
+
+  if (items.length === 0) {
+    grid.innerHTML = '<div class="email-loading">No emails awaiting approval</div>';
+    return;
+  }
+
+  for (const it of items) {
+    const card = document.createElement('div');
+    card.className = 'doclib-card memory-item';
+
+    const content = document.createElement('div');
+    content.style.cssText = 'flex:1;min-width:0;';
+    const subject = it.subject || '(no subject)';
+    const toDisplay = it.to_addr || '(no recipient)';
+    const preview = String(it.body || '').replace(/\s+/g, ' ').trim().slice(0, 100);
+
+    content.innerHTML = `
+      <div style="display:flex;align-items:center;gap:6px;">
+        <span class="memory-item-title">${_esc(subject)}</span>
+        <span style="font-size:9px;color:var(--red);border:1px solid var(--red);padding:1px 4px;border-radius:4px;">NEEDS APPROVAL</span>
+      </div>
+      <div style="font-size:10px;opacity:0.7;margin-top:2px;">To: ${_esc(toDisplay)}</div>
+      ${preview ? `<div style="font-size:10px;opacity:0.6;margin-top:2px;">${_esc(preview)}${preview.length >= 100 ? '…' : ''}</div>` : ''}
+      <div style="display:flex;gap:6px;margin-top:8px;">
+        <button class="ep-approve" style="background:var(--green);color:#0b2018;border:none;border-radius:6px;padding:4px 10px;font-size:11px;font-weight:600;cursor:pointer;">Approve &amp; send</button>
+        <button class="ep-reject" style="background:transparent;color:var(--red);border:1px solid var(--red);border-radius:6px;padding:4px 10px;font-size:11px;font-weight:600;cursor:pointer;">Reject</button>
+      </div>
+    `;
+    card.appendChild(content);
+
+    const approveBtn = content.querySelector('.ep-approve');
+    const rejectBtn = content.querySelector('.ep-reject');
+    approveBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      approveBtn.disabled = rejectBtn.disabled = true;
+      approveBtn.textContent = 'Sending…';
+      try {
+        const r = await fetch(`${API_BASE}/api/email/pending/${encodeURIComponent(it.id)}/approve`, { method: 'POST', credentials: 'same-origin' });
+        const j = await r.json();
+        if (!j.success) throw new Error(j.error || 'approve failed');
+        _loadEmails();
+      } catch (err) {
+        approveBtn.disabled = rejectBtn.disabled = false;
+        approveBtn.textContent = 'Approve & send';
+        const { showError } = await import('./ui.js');
+        showError && showError('Could not approve the email.');
+      }
+    });
+    rejectBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      rejectBtn.disabled = approveBtn.disabled = true;
+      rejectBtn.textContent = 'Rejecting…';
+      try {
+        const r = await fetch(`${API_BASE}/api/email/pending/${encodeURIComponent(it.id)}`, { method: 'DELETE', credentials: 'same-origin' });
+        const j = await r.json();
+        if (!j.success) throw new Error(j.error || 'reject failed');
+        _loadEmails();
+      } catch (err) {
+        rejectBtn.disabled = approveBtn.disabled = false;
+        rejectBtn.textContent = 'Reject';
+        const { showError } = await import('./ui.js');
+        showError && showError('Could not reject the email.');
+      }
+    });
 
     grid.appendChild(card);
   }
